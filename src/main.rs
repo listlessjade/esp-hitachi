@@ -1,76 +1,102 @@
 #![feature(maybe_uninit_slice)]
 
-use std::{rc::Rc, str::FromStr, time::Instant};
+use std::{cell::RefCell, ffi::CString, rc::Rc, str::FromStr, time::Instant};
 
 use ble::run_ble;
-use crossbeam_channel::select;
+use embedded_svc::wifi::Wifi;
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::{
         ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver},
         prelude::*,
+        temp_sensor::{TempSensorConfig, TempSensorDriver},
     },
     mdns::EspMdns,
-    nvs::{EspDefaultNvsPartition, EspNvs, EspNvsPartition, NvsCustom},
-    sys::{esp, esp_mac_type_t_ESP_MAC_BT, esp_read_mac},
+    nvs::EspDefaultNvsPartition,
+    sys::{
+        esp, esp_mac_type_t_ESP_MAC_BT, esp_nofail, esp_read_mac, esp_vfs_spiffs_conf_t,
+        esp_vfs_spiffs_register,
+    },
     timer::EspTaskTimerService,
     wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi},
 };
 use http::run_http;
 use log::info;
 use parking_lot::Mutex;
-use rhai_hal::{ledc::PwmController, timer::CallTimer};
-use rpc::{JsonFuncArgs, RpcCall, RpcResponse};
-use script::ScriptRunner;
+use rhai::Dynamic;
+use rhai_hal::{health::SystemHealth, ledc::PwmController, timer::CallTimer, ws2812::RgbLed};
+use rpc::{
+    ChannelOptions, JsonFuncArgs, MessageSource, ResponseTag, RpcCall, RpcResponse, REQUEST_QUEUE,
+};
+use script::{LovenseArgs, ScriptRunner};
+use ws2812_esp32_rmt_driver::LedPixelEsp32Rmt;
 // use script::ScriptRunner;
 mod script;
-
-const SSID: &str = "";
-const PASSWORD: &str = "";
 
 mod ble;
 mod http;
 mod rhai_hal;
 mod rpc;
 
-// static BLE_REQ_CHANNEL: StaticChannel<Vec<u8>, 16> = StaticChannel::new();
-// static BLE_RES_CHANNEL: StaticChannel<Vec<u8>, 16> = StaticChannel::new();
-
-// fn main() -> anyhow::Result<()> {
-//     esp_idf_svc::sys::link_patches();
-//     esp_idf_svc::log::EspLogger::initialize_default();
-
-//     use esp_idf_svc::hal::ledc::{config::TimerConfig, LedcDriver, LedcTimerDriver};
-//     use esp_idf_svc::hal::peripherals::Peripherals;
-//     use esp_idf_svc::hal::prelude::*;
-
-//     let peripherals = Peripherals::take().unwrap();
-//     // let mut pin = PinDriver::output(peripherals.pins.gpio10).unwrap();
-//     // pin.set_high().unwrap();
-
-//     let max_duty = driver.get_max_duty();
-//     driver.set_duty(max_duty * 3 / 4)?;
-
-//     loop {
-//         std::thread::sleep(Duration::from_secs(1));
-//     }
-
-//     Ok(())
-// }
-
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
     esp_idf_svc::log::EspLogger::initialize_default();
 
-    log::info!("Hello, world!");
+    let (req_tx, req_rx) = REQUEST_QUEUE.split();
+
+    let (ble_tx, ble_res_tx) = rpc::make_channel(
+        req_tx.clone(),
+        ChannelOptions {
+            message_capacity: 8,
+            min_buffer_size: 32,
+            max_buffer_size: 64,
+        },
+    );
+    let (http_tx, http_res_tx) = rpc::make_channel(
+        req_tx.clone(),
+        ChannelOptions {
+            message_capacity: 4,
+            min_buffer_size: 64,
+            max_buffer_size: 512,
+        },
+    );
+
+    esp_idf_svc::log::set_target_level("wifi", log::LevelFilter::Error).unwrap();
+    esp_idf_svc::log::set_target_level("NimBLE", log::LevelFilter::Warn).unwrap();
+    esp_idf_svc::log::set_target_level("wifi_init", log::LevelFilter::Warn).unwrap();
+    esp_idf_svc::log::set_target_level("rhai", log::LevelFilter::Info).unwrap();
+
+    log::info!("{}", include_str!("../banner.txt"));
+    log::info!("Firmware built on {}", compile_time::datetime_str!());
 
     let peripherals = Peripherals::take()?;
     let sys_loop = EspSystemEventLoop::take()?;
     let default_nvs = EspDefaultNvsPartition::take()?;
 
+    unsafe {
+        let base_path = CString::new("/spiffs").unwrap();
+        let storage = CString::new("programs").unwrap();
+
+        let conf = esp_vfs_spiffs_conf_t {
+            base_path: base_path.as_ptr(),
+            partition_label: storage.as_ptr(),
+            max_files: 1,
+            format_if_mount_failed: true,
+        };
+
+        esp_nofail!(esp_vfs_spiffs_register(&conf));
+    }
+
+    let led_driver = RgbLed {
+        driver: Rc::new(RefCell::new(LedPixelEsp32Rmt::new(
+            peripherals.rmt.channel0,
+            peripherals.pins.gpio8,
+        )?)),
+    };
+
     let timer_driver = LedcTimerDriver::new(
         peripherals.ledc.timer0,
-        &TimerConfig::default().frequency(25.kHz().into()),
+        &TimerConfig::default().frequency(5.kHz().into()),
     )
     .unwrap();
     let driver = LedcDriver::new(
@@ -84,7 +110,7 @@ fn main() -> anyhow::Result<()> {
         sys_loop,
     )?;
 
-    connect_wifi(&mut wifi)?;
+    let _ = connect_wifi(&mut wifi);
 
     let mut mac = [0u8; 6];
     esp!(unsafe { esp_read_mac(mac.as_mut_ptr(), esp_mac_type_t_ESP_MAC_BT) })?;
@@ -92,9 +118,6 @@ fn main() -> anyhow::Result<()> {
         "{:<02X}{:<02X}{:<02X}{:<02X}{:<02X}{:<02X}",
         mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]
     );
-
-    let program_nvs_part = EspNvsPartition::<NvsCustom>::take("programs")?;
-    let mut program_nvs = EspNvs::new(program_nvs_part, "scripts", true)?;
 
     // if let Some(program) = program_nvs.get_ra
 
@@ -105,7 +128,7 @@ fn main() -> anyhow::Result<()> {
     mdns.add_service(None, "_magicwandrpc", "_tcp", 8080, &[("version", "0")])?;
 
     // std::thread::scope(move |s| {
-    let mut script_engine = ScriptRunner::new();
+    let mut script_engine = ScriptRunner::new(ble_res_tx.clone());
 
     script_engine.insert_builtin(
         "pwm",
@@ -117,122 +140,160 @@ fn main() -> anyhow::Result<()> {
 
     script_engine.insert_builtin("mac_address", mac_addr);
 
-    let (timer_tx, timer_rx) = crossbeam_channel::bounded::<()>(0);
     let timer_service = EspTaskTimerService::new()?;
+
+    let timer_tx = req_tx.clone();
 
     script_engine.insert_builtin(
         "timer",
         CallTimer {
             interval: 0,
             inner: Rc::new(timer_service.timer(move || {
-                timer_tx.send(()).unwrap();
+                let mut slot = timer_tx.send_ref().unwrap();
+                slot.src = MessageSource::Timer;
+                drop(slot);
+                // timer_tx.send(()).unwrap();
             })?),
         },
     );
 
-    if let Some(script_len) = program_nvs.blob_len("script")?.filter(|v| *v > 0) {
-        let mut script_buf = vec![0; script_len];
-        let script = program_nvs.get_blob("script", &mut script_buf)?.unwrap();
-        let script = std::str::from_utf8(script).unwrap();
-        let _ = dbg!(script_engine.recompile(script));
+    let mut temp_sensor = TempSensorDriver::new(&TempSensorConfig::new(), peripherals.temp_sensor)?;
+
+    temp_sensor.enable().unwrap();
+
+    script_engine.insert_builtin(
+        "system",
+        SystemHealth {
+            temp_sensor: Rc::new(temp_sensor),
+        },
+    );
+
+    script_engine.insert_builtin("led", led_driver);
+
+    if std::fs::exists("/spiffs/script.rhai")? {
+        script_engine.recompile(&std::fs::read_to_string("/spiffs/script.rhai")?)?;
     }
 
-    // let (ble_req_tx, ble_req_rx) = BLE_REQ_CHANNEL.split();
-    // let (ble_res_tx, ble_res_rx) = BLE_RES_CHANNEL.split();
-    let (ble_tx, ble_rx) = rpc::make_channel(4);
-    let (http_tx, http_rx) = rpc::make_channel(4);
-    let (lovense_tx, lovense_rx) = rpc::make_channel(4);
     // let (ws_tx, ws_rx) = rpc::make_channel(4);
 
-    let _ble_thread = std::thread::spawn(|| run_ble(ble_tx, lovense_tx));
+    let _ble_thread = std::thread::spawn(|| run_ble(ble_tx));
     let _http_server = run_http(http_tx, 8080);
 
     loop {
-        let (req, res_channel) = select! {
-            recv(ble_rx.req_rx) -> req => {
-                (req.unwrap(), &ble_rx.res_tx)
-            },
-            recv(http_rx.req_rx) -> req => {
-                (req.unwrap(), &http_rx.res_tx)
-            },
-            recv(timer_rx) -> _ => {
-                let _ = script_engine.call::<rhai::Dynamic>("tick", (rhai::Dynamic::from_timestamp(Instant::now()), ));
-                continue;
-            },
-            recv(lovense_rx.req_rx) -> req => {
-                let req = String::from_utf8(req.unwrap()).unwrap();
-                log::info!("lovense req: {req}");
-                let end = req.find(';').unwrap();
+        let message = req_rx.recv_ref().unwrap();
+        let mut response_tag: ResponseTag = ResponseTag::Normal; // tags the response with a certain value at the end of the buffer
 
-                let args: Vec<rhai::Dynamic> = (req[..end].split_terminator(':')).map(|s| rhai::Dynamic::from_str(s).unwrap()).collect::<Vec<_>>();
-                dbg!(&args);
-
-                let res = script_engine.call::<rhai::Dynamic>("lovense", (args,));
-                let res: Vec<String> = res.into_typed_array().unwrap();
-
-                let mut res = res.join(":");
-                res.push(';');
-                log::info!("lovense ret: {res}");
-                lovense_rx.res_tx.send(res.into_bytes()).unwrap();
+        let res_channel = match message.src {
+            MessageSource::BleRpc => {
+                response_tag = ResponseTag::BleRpc;
+                &ble_res_tx
+            }
+            MessageSource::HttpRpc => &http_res_tx,
+            MessageSource::Timer => {
+                let _ = script_engine.call::<rhai::Dynamic>(
+                    "tick",
+                    (rhai::Dynamic::from_timestamp(Instant::now()),),
+                );
                 continue;
             }
-            // recv(ws_rx.req_rx) -> req => {
-            //     (req.unwrap(), &ws_rx.res_tx)
-            // }
+            MessageSource::BleLovense => {
+                let Some(lovense_args) =
+                    LovenseArgs::new(std::str::from_utf8(&message.buffer).unwrap())
+                else {
+                    continue;
+                };
+
+                let Ok(res) = script_engine.call::<rhai::Dynamic>("lovense", lovense_args) else {
+                    continue;
+                };
+                let mut res: Vec<Dynamic> = res.into_array().unwrap();
+
+                let mut send_slot = ble_res_tx.send_ref().unwrap();
+                let mut res_iter = res.iter_mut();
+
+                if let Some(first) = res_iter.next() {
+                    send_slot.buffer.extend_from_slice(
+                        first.take().into_immutable_string().unwrap().as_bytes(),
+                    );
+                }
+
+                for arg in res_iter {
+                    send_slot.buffer.push(b':');
+                    send_slot
+                        .buffer
+                        .extend_from_slice(arg.take().into_immutable_string().unwrap().as_bytes());
+                }
+
+                // for lovense messages, we add a last byte to the array indicating it's a lovense one
+                send_slot.tag = ResponseTag::Lovense;
+
+                drop(send_slot);
+
+                continue;
+            }
         };
 
-        // let req = ble_req_rx.recv_ref().unwrap();
-        // let req = ble_req_rx.recv().unwrap();
-
-        let request: RpcCall<'_> = serde_json::from_slice(&req)?;
+        let request: RpcCall<'_> = serde_json::from_slice(&message.buffer)?;
 
         let (namespace, method) = request.method.split_once(':').unwrap();
 
-        let res = match (namespace, method) {
-            ("mgmt", "set_script") => {
-                let new_script: String = serde_json::from_str(request.params.get())?;
-                program_nvs.set_blob("script", new_script.as_bytes())?;
-                let _ = dbg!(script_engine.recompile(&new_script));
-                rhai::Dynamic::UNIT
+        let (res, err) = match (namespace, method) {
+            ("mgmt", "recompile") => {
+                script_engine.recompile(&std::fs::read_to_string("/spiffs/script.rhai")?)?;
+                (rhai::Dynamic::TRUE, None)
             }
             ("mgmt", "restart") => {
                 esp_idf_svc::hal::reset::restart();
             }
-            ("rpc", call) => script_engine.call(call, JsonFuncArgs(request.params)),
-            _ => todo!(),
+            ("mgmt", "set_wifi") => {
+                let args: Vec<String> = serde_json::from_str(request.params.get())?;
+                let mut config = Configuration::Client(ClientConfiguration::default());
+                config.as_client_conf_mut().ssid = heapless::String::from_str(&args[0]).unwrap();
+                config.as_client_conf_mut().password =
+                    heapless::String::from_str(&args[1]).unwrap();
+                config.as_client_conf_mut().auth_method = AuthMethod::WPA2Personal;
+                match wifi.set_configuration(&config) {
+                    Ok(_) => (rhai::Dynamic::TRUE, None),
+                    Err(e) => (rhai::Dynamic::FALSE, Some(e.to_string())),
+                }
+            }
+            ("rpc", call) => match script_engine.call(call, JsonFuncArgs(request.params)) {
+                Ok(v) => (v, None),
+                Err(e) => (rhai::Dynamic::UNIT, Some(e.to_string())),
+            },
+            _ => (rhai::Dynamic::UNIT, Some("invalid method call".to_owned())),
         };
 
-        res_channel
-            .send(serde_json::to_vec(&RpcResponse {
+        let mut slot = res_channel.send_ref().unwrap();
+        slot.tag = response_tag;
+        serde_json::to_writer(
+            &mut slot.buffer,
+            &RpcResponse {
                 id: request.id,
                 result: res,
-                error: rhai::Dynamic::UNIT,
-            })?)
-            .unwrap();
+                error: err,
+            },
+        )?;
+
+        drop(slot);
     }
 }
 
 fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {
-    let wifi_configuration: Configuration = Configuration::Client(ClientConfiguration {
-        ssid: SSID.try_into().unwrap(),
-        bssid: None,
-        auth_method: AuthMethod::WPA2Personal,
-        password: PASSWORD.try_into().unwrap(),
-        channel: None,
-        ..Default::default()
-    });
+    if let Ok(config) = wifi.get_configuration() {
+        wifi.set_configuration(&config)?;
 
-    wifi.set_configuration(&wifi_configuration)?;
+        wifi.start()?;
+        info!("Wifi started");
 
-    wifi.start()?;
-    info!("Wifi started");
+        wifi.connect()?;
+        info!("Wifi connected");
 
-    wifi.connect()?;
-    info!("Wifi connected");
+        wifi.wait_netif_up()?;
+        info!("Wifi netif up");
 
-    wifi.wait_netif_up()?;
-    info!("Wifi netif up");
+        info!("{:?}", wifi.wifi().sta_netif().get_ip_info()?);
+    }
 
-    info!("{:?}", wifi.wifi().sta_netif().get_ip_info()?);
     Ok(())
 }
