@@ -1,6 +1,6 @@
 // use tiny_http::{Method, Response};
 
-use std::{cell::RefCell, fs::File, io::Write};
+use std::cell::RefCell;
 
 use embedded_svc::http::Headers;
 use esp_idf_svc::{
@@ -43,25 +43,6 @@ pub fn run_http(
         let res = http_channel.res_rx.recv_ref().unwrap();
         let mut resp = req.into_ok_response()?;
         resp.write_all(&res.buffer)?;
-
-        Ok(())
-    })?;
-
-    server.fn_handler::<anyhow::Error, _>("/ota/script", Method::Post, move |mut req| {
-        let mut file = File::create("/spiffs/script.rhai")?;
-
-        let mut buf = vec![0; 256];
-        let mut total_bytes_read = 0;
-        let file_size = req.content_len().unwrap_or_default() as usize;
-
-        while total_bytes_read < file_size {
-            let bytes_read = req.read(&mut buf)?;
-            file.write_all(&buf[..bytes_read])?;
-            total_bytes_read += bytes_read;
-        }
-
-        let mut res = req.into_ok_response()?;
-        res.write_all(b"script updated!")?;
 
         Ok(())
     })?;

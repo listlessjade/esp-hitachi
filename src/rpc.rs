@@ -1,4 +1,4 @@
-use rhai::FuncArgs;
+use serde::Serialize;
 use serde_json::value::RawValue;
 use thingbuf::mpsc::{
     self,
@@ -10,7 +10,7 @@ pub enum MessageSource {
     BleRpc,
     BleLovense,
     HttpRpc,
-    Timer,
+    // Timer,
     // WsRpc,
     // Invalid
 }
@@ -26,11 +26,13 @@ pub struct ResponseMessage {
 }
 
 #[repr(u8)]
+#[allow(dead_code)]
 pub enum ResponseTag {
     Normal,
     Lovense,
     BleRpc,
     Log,
+    Discard,
 }
 
 pub struct MessageRecycler {
@@ -116,16 +118,22 @@ pub struct RpcCall<'a> {
 #[derive(serde::Serialize)]
 pub struct RpcResponse {
     pub id: u8,
-    pub result: rhai::Dynamic,
+    pub result: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-pub struct JsonFuncArgs<'a>(pub &'a RawValue);
+impl RpcResponse {
+    pub fn new<T: Serialize, E: ToString>(id: u8, res: Result<T, E>) -> RpcResponse {
+        let (result, err) = match res {
+            Ok(v) => (serde_json::to_value(v).unwrap(), None),
+            Err(e) => (serde_json::Value::Null, Some(e.to_string())),
+        };
 
-impl<'a> FuncArgs for JsonFuncArgs<'a> {
-    fn parse<ARGS: Extend<rhai::Dynamic>>(self, args: &mut ARGS) {
-        let parsed: Vec<rhai::Dynamic> = serde_json::from_str(self.0.get()).unwrap();
-        args.extend(parsed);
+        RpcResponse {
+            id,
+            result,
+            error: err,
+        }
     }
 }

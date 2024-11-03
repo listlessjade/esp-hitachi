@@ -112,6 +112,7 @@ pub fn run_ble(engine: RpcRequester) {
             ResponseTag::Log => log_tx.lock().set_value(&res.buffer).notify(),
             ResponseTag::Lovense => lovense_tx.lock().set_value(&res.buffer).notify(),
             ResponseTag::BleRpc => response_char.lock().set_value(&res.buffer).notify(),
+            ResponseTag::Discard => continue,
         };
     }
 }

@@ -29,7 +29,6 @@ log = { version = "0.4", default-features = false }
 esp-idf-svc = { version = "0.49", default-features = false, features = ["std", "binstart", "alloc", "experimental", "critical-section", "native"] }
 anyhow = "1.0.88"
 embedded-svc = "0.28.0"
-rhai = { version = "1.19.0", features = ["internals", "no_closure", "no_custom_syntax", "serde"] }
 parking_lot = "0.12.3"
 serde_json = { version = "1.0.128", default-features = false, features = ["alloc", "raw_value", "std"] }
 serde = { version = "1.0.210", features = ["alloc", "derive", "std"], default-features = false }
@@ -40,8 +39,8 @@ heapless = { version = "0.8.0", features = ["serde"] }
 smart-leds-trait = "0.3.0"
 esp-idf-hal = { git = "https://github.com/kore-signet/esp-idf-hal.git", features = ["rmt-legacy"] }
 ws2812-esp32-rmt-driver = { version = "0.10.0-alpha.1", features = ["smart-leds-trait"] }
-rhai-rand = "0.1.6"
 multi_log = "0.1.2"
+mycelium-bitfield = "0.1.5"
 
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/mdns", version = "1.2" }
