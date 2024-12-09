@@ -4,9 +4,11 @@ import asyncio
 from dataclasses import dataclass
 import functools
 import json
+import os
 import typing
 from typing import Any, Optional
 import logging
+import aiofiles
 import aiohttp
 from bleak import BleakClient, BleakScanner
 import requests
@@ -35,6 +37,17 @@ class RPCClient(ABC):
     @abstractmethod
     async def is_alive(self) -> bool:
         pass
+
+async def upload_with_progress(path: str):
+    chunk_size = 1024 * 8
+    size = os.path.getsize(path)
+    total_read = 0
+    with tqdm(total=size, unit="B", unit_scale=True, unit_divisor=1024) as bar:
+        async with aiofiles.open(path, "rb") as f:
+            while chunk := await f.read(chunk_size):
+                bar.update(len(chunk))
+                yield chunk
+
 
 class HTTPRpc(RPCClient):
     MDNS_TYPE = "_magicwandrpc._tcp.local."
@@ -105,12 +118,10 @@ class HTTPRpc(RPCClient):
         except aiohttp.ClientError:
             return False
         
-    async def ota_upload(self, file: typing.BinaryIO, file_size: int) -> str:
-        with tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024) as progress:
-            wrapped_file = CallbackIOWrapper(progress.update, file, "read")
-            async with self.session.post(self.route("/ota/upload"), data=wrapped_file, headers={"Content-Type": "application/octet-stream"}) as res:
-                res.raise_for_status()
-                return await res.text()
+    async def ota_upload(self, file: str) -> str:
+        async with self.session.post(self.route("/ota/upload"), data=upload_with_progress(file), headers={"Content-Type": "application/octet-stream", "Content-Length": str(os.path.getsize(file))}) as res:
+            res.raise_for_status()
+            return await res.text()
     
 class BLERpc(RPCClient):
     REQ_CHAR = "813f9733-95c9-49ba-84a0-d0167c260eef"

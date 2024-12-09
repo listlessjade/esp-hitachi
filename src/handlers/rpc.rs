@@ -1,4 +1,4 @@
-use std::{fs::File, net::Ipv4Addr, rc::Rc};
+use std::{net::Ipv4Addr, rc::Rc};
 
 use anyhow::anyhow;
 use esp_idf_hal::{
@@ -6,7 +6,6 @@ use esp_idf_hal::{
     temp_sensor::TempSensorDriver,
 };
 use esp_idf_svc::sys::esp_mac_type_t;
-use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use serde::Serialize;
 use thingbuf::mpsc::blocking::StaticSender;
 
@@ -16,7 +15,8 @@ use crate::hal::husb238::{Capabilities, Husb238Driver, Status};
 use crate::{
     hal::ledc::PwmController,
     rpc::{RpcCall, RpcResponse},
-    BuildInfo, WifiConfig, BUILD_INFO, LAST_UART_MSG,
+    wifi::{WifiConfig, WifiManager},
+    BuildInfo, BUILD_INFO, LAST_UART_MSG,
 };
 use esp_idf_hal::sys::{
     esp_mac_type_t_ESP_MAC_BASE, esp_mac_type_t_ESP_MAC_BT, esp_mac_type_t_ESP_MAC_WIFI_STA,
@@ -34,7 +34,7 @@ impl RpcHandler {
     pub fn new(
         pwm: Rc<parking_lot::Mutex<PwmController>>,
         temp: TempSensorDriver<'static>,
-        wifi: BlockingWifi<EspWifi<'static>>,
+        wifi: WifiManager,
         uart_tx: StaticSender<String>,
     ) -> Self {
         Self {
@@ -151,7 +151,7 @@ impl MACAddresses {
 }
 
 pub struct ConnHandler {
-    wifi: BlockingWifi<EspWifi<'static>>,
+    wifi: WifiManager,
 }
 
 impl ConnHandler {
@@ -160,15 +160,18 @@ impl ConnHandler {
     }
 
     pub fn set_wifi(&mut self, args: [WifiConfig; 1]) -> anyhow::Result<()> {
-        let mut file = File::create("/littlefs/wifi.json")?;
-        serde_json::to_writer(&mut file, &args[0])?;
+        let [conf] = args;
+        self.wifi.store_config(&conf)?;
+        self.wifi.stop()?;
+        self.wifi.set_config(conf)?;
+        self.wifi.start()?;
 
         Ok(())
     }
 
     pub fn addr(&mut self) -> anyhow::Result<Addresses> {
         Ok(Addresses {
-            ip: self.wifi.wifi().sta_netif().get_ip_info()?.ip,
+            ip: self.wifi.get_ip()?,
             mac: MACAddresses::get()?,
         })
     }

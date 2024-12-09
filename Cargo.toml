@@ -34,12 +34,10 @@ serde_json = { version = "1.0.128", default-features = false, features = ["alloc
 serde = { version = "1.0.210", features = ["alloc", "derive", "std"], default-features = false }
 esp32-nimble = "0.8.0"
 thingbuf = { git = "https://github.com/kore-signet/thingbuf.git", features = ["static"] }
-compile-time = "0.2.0"
 heapless = { version = "0.8.0", features = ["serde"] }
 esp-idf-hal = { git = "https://github.com/kore-signet/esp-idf-hal.git", features = ["rmt-legacy"] }
 multi_log = "0.1.2"
 mycelium-bitfield = "0.1.5"
-tsz-compress = "1.1.6"
 memchr = "2.7.4"
 arrayvec = "0.7.6"
 

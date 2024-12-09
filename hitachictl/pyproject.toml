@@ -18,4 +18,5 @@ dependencies = [
     "asyncclick>=8.1.7.2",
     "asyncclick-repl>=0.1.2",
     "pyserde>=0.22.2",
+    "aiofiles>=24.1.0",
 ]

@@ -1,15 +1,10 @@
 #![feature(maybe_uninit_slice)]
 
-use std::{ffi::CString, fs::File, rc::Rc};
+use std::{ffi::CString, rc::Rc};
 
 use ble::run_ble;
-use embedded_svc::wifi::Wifi;
 use esp_idf_hal::{
     gpio,
-    sys::{
-        esp, esp_eap_client_set_identity, esp_eap_client_set_password, esp_eap_client_set_username,
-        esp_wifi_sta_enterprise_enable,
-    },
     uart::UartDriver,
 };
 use esp_idf_svc::{
@@ -22,16 +17,16 @@ use esp_idf_svc::{
     mdns::EspMdns,
     nvs::EspDefaultNvsPartition,
     sys::{esp_nofail, esp_vfs_littlefs_conf_t, esp_vfs_littlefs_register},
-    wifi::{AuthMethod, BlockingWifi, EspWifi},
+    wifi::EspWifi,
 };
 #[cfg(feature = "usb_pd")]
 use hal::husb238::Husb238Driver;
 use hal::{ledc::PwmController, uart::spawn_uart_thread};
 use handlers::{lovense::LovenseHandler, rpc::RpcHandler};
 use http::run_http;
-use log::info;
 use rpc::{ChannelOptions, MessageSource, ResponseTag, RpcCall, RpcResponse, REQUEST_QUEUE};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+use wifi::WifiManager;
 // use script::ScriptRunner;
 
 mod ble;
@@ -39,6 +34,7 @@ mod hal;
 mod handlers;
 mod http;
 mod rpc;
+mod wifi;
 
 #[derive(Serialize, Copy, Clone)]
 pub struct BuildInfo {
@@ -90,7 +86,7 @@ fn main() -> anyhow::Result<()> {
         },
     );
 
-    let (uart_requester, uart_res_tx) = rpc::make_channel(
+    let (uart_requester, _uart_res_tx) = rpc::make_channel(
         req_tx.clone(),
         ChannelOptions {
             message_capacity: 4,
@@ -105,7 +101,7 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::log::set_target_level("rhai", log::LevelFilter::Info).unwrap();
 
     log::info!("{}", include_str!("../banner.txt"));
-    log::info!("Firmware built on {}", compile_time::datetime_str!());
+    log::info!("Firmware built on {}", env!("BUILD_TIMESTAMP"));
 
     let peripherals = Peripherals::take()?;
     let sys_loop = EspSystemEventLoop::take()?;
@@ -114,7 +110,6 @@ fn main() -> anyhow::Result<()> {
     let uart_tx = peripherals.pins.gpio22;
     let uart_rx = peripherals.pins.gpio23;
 
-    println!("Starting UART loopback test");
     let config = esp_idf_hal::uart::config::Config::new().baudrate(Hertz(9600));
     let uart: UartDriver<'static> = UartDriver::new(
         peripherals.uart1,
@@ -147,14 +142,28 @@ fn main() -> anyhow::Result<()> {
         esp_nofail!(esp_vfs_littlefs_register(&conf));
     }
 
-    let mut wifi = BlockingWifi::wrap(
+    let wifi = WifiManager::new(
         EspWifi::new(peripherals.modem, sys_loop.clone(), Some(default_nvs))?,
         sys_loop,
-    )?;
+    );
 
-    let _ = connect_wifi(&mut wifi);
+    match WifiManager::read_config() {
+        Ok(Some(v)) => {
+            if let Err(e) = wifi.set_config(v) {
+                log::error!("Failed to set wifi config: {e}");
+            }
+        }
+        Ok(None) => {
+            log::warn!("Failed to set wifi config: non-existent")
+        }
+        Err(e) => {
+            log::error!("Failed to read wifi config: {e}");
+        }
+    };
 
-    // let _sntp = EspSntp::new_default()?;
+    if let Err(e) = wifi.start() {
+        log::error!("Failed to start wifi: {e}");
+    };
 
     let mut mdns = EspMdns::take()?;
 
@@ -268,94 +277,4 @@ fn main() -> anyhow::Result<()> {
 
         drop(slot);
     }
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct WifiConfig {
-    pub ssid: heapless::String<32>,
-    pub authentication: WifiAuthentication,
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "type")]
-pub enum WifiAuthentication {
-    #[serde(alias = "personal")]
-    WPA2Personal { password: heapless::String<64> },
-    #[serde(alias = "enterprise")]
-    WPA2Enterprise {
-        identity: String,
-        username: String,
-        password: String,
-    },
-}
-
-fn read_wifi_config() -> anyhow::Result<Option<WifiConfig>> {
-    if std::fs::exists("/littlefs/wifi.json")? {
-        let mut file = File::open("/littlefs/wifi.json")?;
-        let config = serde_json::from_reader(&mut file)?;
-        Ok(Some(config))
-    } else {
-        Ok(None)
-    }
-}
-
-fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {
-    if let Ok(mut config) = wifi.get_configuration() {
-        if let Some(stored_config) = read_wifi_config()? {
-            let live_config = config.as_client_conf_mut();
-            live_config.ssid = stored_config.ssid;
-            match stored_config.authentication {
-                WifiAuthentication::WPA2Personal { password } => {
-                    live_config.auth_method = AuthMethod::WPA2Personal;
-                    live_config.password = password;
-                }
-                WifiAuthentication::WPA2Enterprise {
-                    identity,
-                    username,
-                    password,
-                } => {
-                    live_config.auth_method = AuthMethod::WPA2Enterprise;
-                    esp!(unsafe {
-                        esp_eap_client_set_identity(
-                            identity.as_ptr(),
-                            identity.as_bytes().len() as i32,
-                        )
-                    })?;
-
-                    esp!(unsafe {
-                        esp_eap_client_set_username(
-                            username.as_ptr(),
-                            username.as_bytes().len() as i32,
-                        )
-                    })?;
-
-                    esp!(unsafe {
-                        esp_eap_client_set_password(
-                            password.as_ptr(),
-                            password.as_bytes().len() as i32,
-                        )
-                    })?;
-
-                    esp!(unsafe { esp_wifi_sta_enterprise_enable() })?;
-                }
-            }
-        } else {
-            return Ok(());
-        }
-
-        wifi.set_configuration(&config)?;
-
-        wifi.start().unwrap();
-        info!("Wifi started");
-
-        wifi.connect().unwrap();
-        info!("Wifi connected");
-
-        wifi.wait_netif_up().unwrap();
-        info!("Wifi netif up");
-
-        info!("{:?}", wifi.wifi().sta_netif().get_ip_info()?);
-    }
-
-    Ok(())
 }

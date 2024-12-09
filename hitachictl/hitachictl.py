@@ -127,31 +127,8 @@ async def uart_send(msg: str):
 async def uart_get_last():
     print(await client.uart_get_last())
 
-
-# @cli.command()
-# @click.argument("new_image", type=click.File("rb"))
-# def update_firmware(new_image):
-#     firmware = new_image.read()
-#     r = requests.post(
-#         f"http://{hitachi_ip}:{hitachi_port}/ota/firmware",
-#         data=firmware,
-#         headers={"Content-Type": "application/octet-stream"},
-#     )
-#     print(r.text)
-
-# @cli.command()
-# def monitor_uart():
-#     async def monitor():
-#         async with connect(f"ws://{hitachi_ip}:{hitachi_port}/uart/monitor") as ws:
-#             while True:
-#                 message = await ws.recv()
-#                 print(f"UART: {message.strip()}");
-
-#     loop.run_until_complete(monitor())
-
-
 @cli.command()
-def build_update_firmware():
+async def build_update_firmware():
     subprocess.run(["cargo", "build", "--release"], check=True)
     subprocess.run(
         [
@@ -166,17 +143,12 @@ def build_update_firmware():
         ]
     )
 
-    file_size = os.stat("/tmp/hitachi.bin").st_size
-    firmware = open("/tmp/hitachi.bin", "rb")
+    print(await client.http.ota_upload('/tmp/hitachi.bin'))
 
-    with tqdm(total=file_size, unit="B", unit_scale=True, unit_divisor=1024) as t:
-        wrapped_file = CallbackIOWrapper(t.update, firmware, "read")
-        r = requests.post(
-            f"http://192.168.0.126:8080/ota/upload",
-            data=wrapped_file,
-            headers={"Content-Type": "application/octet-stream"},
-        )
-    print(r.text)
+@cli.command()
+@click.argument("new_image", type=click.Path(exists=True,file_okay=True,dir_okay=False))
+async def update_firmware(new_image: str):
+    print(await client.http.ota_upload(new_image))
 
 
 if __name__ == "__main__":
