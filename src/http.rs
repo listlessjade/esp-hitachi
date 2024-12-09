@@ -20,6 +20,7 @@ pub fn run_http(
     http_channel: RpcRequester,
     // ws_channel: RpcRequester,
     port: u16,
+    // uart_rx: Arc<Queue<ArrayString<32>>>
 ) -> anyhow::Result<EspHttpServer<'static>> {
     // let server = tiny_http::Server::http(addr).unwrap();
     let config = esp_idf_svc::http::server::Configuration {
@@ -31,7 +32,13 @@ pub fn run_http(
 
     // let req_tx = http_channel.req_tx.clone();
 
-    server.fn_handler::<anyhow::Error, _>("/post", Method::Post, move |mut req| {
+    server.fn_handler::<anyhow::Error, _>("/check", Method::Get, |req| {
+        let mut resp = req.into_ok_response()?;
+        resp.write_all(b"alive")?;
+        Ok(())
+    })?;
+
+    server.fn_handler::<anyhow::Error, _>("/rpc", Method::Post, move |mut req| {
         let mut slot = http_channel.req_tx.send_ref().unwrap();
         slot.src = MessageSource::HttpRpc;
 
@@ -41,19 +48,28 @@ pub fn run_http(
         drop(slot);
 
         let res = http_channel.res_rx.recv_ref().unwrap();
-        let mut resp = req.into_ok_response()?;
+        let mut resp =
+            req.into_response(200, Some("OK"), &[("Content-Type", "application/json")])?;
         resp.write_all(&res.buffer)?;
-
         Ok(())
     })?;
 
     server.handler(
-        "/ota/firmware",
+        "/ota/upload",
         Method::Post,
         FirmwareUpdateHandler {
             ota: RefCell::new(EspOta::new().unwrap()),
         },
     )?;
+
+    // server.ws_handler("/uart/monitor", move |mut conn| -> anyhow::Result<()> {
+    //     while !conn.is_closed() {
+    //         let (data, _) = uart_rx.recv_front(BLOCK).unwrap();
+    //         let _ = conn.send(esp_idf_svc::ws::FrameType::Text(false), data.as_bytes())?;
+    //     }
+
+    //     Ok(())
+    // })?;
 
     Ok(server)
 }

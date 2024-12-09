@@ -1,0 +1,21 @@
+[project]
+name = "hitachictl"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "bleak>=0.20.2",
+    "click>=8.1.7",
+    "click-repl>=0.3.0",
+    "requests>=2.31.0",
+    "textual-slider>=0.1.2",
+    "textual==0.89.1",
+    "zeroconf>=0.131.0",
+    "websockets>=14.1",
+    "tqdm>=4.67.1",
+    "aiohttp>=3.11.10",
+    "asyncclick>=8.1.7.2",
+    "asyncclick-repl>=0.1.2",
+    "pyserde>=0.22.2",
+]

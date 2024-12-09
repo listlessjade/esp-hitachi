@@ -78,7 +78,12 @@ impl Husb238Driver {
 
         println!("{:?}", selection);
 
-        self.write_register(SRC_PDO::ADDR, 0b0010)?;
+        self.write_register(
+            SRC_PDO::ADDR,
+            SRC_PDO::new()
+                .with(SRC_PDO::PDO_SELECTION, selection)
+                .bits(),
+        )?;
         self.write_register(GO_COMMAND::ADDR, 1)?;
         // self.write_command(i2c::Command::RequestPdo).map_err(rhai_anyhow)?;
 

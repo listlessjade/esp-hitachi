@@ -10,9 +10,9 @@ pub enum MessageSource {
     BleRpc,
     BleLovense,
     HttpRpc,
-    // Timer,
-    // WsRpc,
-    // Invalid
+    Uart, // Timer,
+          // WsRpc,
+          // Invalid
 }
 
 pub struct RequestMessage {
@@ -78,8 +78,8 @@ impl thingbuf::Recycle<ResponseMessage> for MessageRecycler {
     }
 }
 
-pub static REQUEST_QUEUE: StaticChannel<RequestMessage, 16, MessageRecycler> =
-    StaticChannel::<RequestMessage, 16, MessageRecycler>::with_recycle(MessageRecycler::new(
+pub static REQUEST_QUEUE: StaticChannel<RequestMessage, 32, MessageRecycler> =
+    StaticChannel::<RequestMessage, 32, MessageRecycler>::with_recycle(MessageRecycler::new(
         32, 512,
     ));
 
@@ -117,7 +117,7 @@ pub struct RpcCall<'a> {
 
 #[derive(serde::Serialize)]
 pub struct RpcResponse {
-    pub id: u8,
+    pub res_id: u8,
     pub result: serde_json::Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -131,7 +131,7 @@ impl RpcResponse {
         };
 
         RpcResponse {
-            id,
+            res_id: id,
             result,
             error: err,
         }

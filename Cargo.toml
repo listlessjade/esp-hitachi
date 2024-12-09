@@ -4,7 +4,7 @@ version = "0.1.0"
 authors = ["kore <emily@cat-girl.gay>"]
 edition = "2021"
 resolver = "2"
-rust-version = "1.77"
+rust-version = "1.81"
 description = "meow"
 
 [patch.crates-io]
@@ -15,7 +15,7 @@ name = "esp-hitachi"
 harness = false # do not use the built in cargo test harness -> resolve rust-analyzer errors
 
 [profile.release]
-opt-level = "s"
+opt-level = "z"
 lto = true
 strip = true
 codegen-units = 1
@@ -26,7 +26,7 @@ opt-level = "z"
 
 [dependencies]
 log = { version = "0.4", default-features = false }
-esp-idf-svc = { version = "0.49", default-features = false, features = ["std", "binstart", "alloc", "experimental", "critical-section", "native"] }
+esp-idf-svc = { version = "0.49.1", default-features = false, features = ["std", "binstart", "alloc", "experimental", "critical-section", "native"] }
 anyhow = "1.0.88"
 embedded-svc = "0.28.0"
 parking_lot = "0.12.3"
@@ -36,14 +36,24 @@ esp32-nimble = "0.8.0"
 thingbuf = { git = "https://github.com/kore-signet/thingbuf.git", features = ["static"] }
 compile-time = "0.2.0"
 heapless = { version = "0.8.0", features = ["serde"] }
-smart-leds-trait = "0.3.0"
 esp-idf-hal = { git = "https://github.com/kore-signet/esp-idf-hal.git", features = ["rmt-legacy"] }
-ws2812-esp32-rmt-driver = { version = "0.10.0-alpha.1", features = ["smart-leds-trait"] }
 multi_log = "0.1.2"
 mycelium-bitfield = "0.1.5"
+tsz-compress = "1.1.6"
+memchr = "2.7.4"
+arrayvec = "0.7.6"
 
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/mdns", version = "1.2" }
 
+[[package.metadata.esp-idf-sys.extra_components]]
+remote_component = { name = "joltwallet/littlefs", version = "1.14.8" }
+bindings_header = "esp_littlefs.h"
+
 [build-dependencies]
 embuild = "0.32.0"
+cc = "=1.1.30"
+build-data = "0.2.1"
+
+[features]
+usb_pd = []

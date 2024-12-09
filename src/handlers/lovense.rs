@@ -32,7 +32,7 @@ impl LovenseHandler {
             "GetLight" => &["Light", "1"],
             "Vibrate" => {
                 let lovense_range = 0..20;
-                let target_range = 50..100;
+                let target_range = 65..100;
 
                 let strength = args[1].parse::<i64>().unwrap();
                 let mapped = if strength > 0 {
@@ -42,6 +42,16 @@ impl LovenseHandler {
                 };
 
                 self.pwm.lock().set_percent(mapped);
+
+                // let max_duty = 999;
+                // let duty = max_duty as f64 * (mapped as f64 / 100.0);
+                // let duty: i64 = duty.trunc() as i64;
+
+                // if mapped > 0 {
+                //     self.uart_tx.send("1111,".to_string()).unwrap();
+                // } else {
+                //     self.uart_tx.send("1111,".to_string()).unwrap();
+                // }
 
                 &[]
             }

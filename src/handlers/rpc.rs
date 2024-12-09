@@ -1,4 +1,4 @@
-use std::{net::Ipv4Addr, rc::Rc, str::FromStr};
+use std::{fs::File, net::Ipv4Addr, rc::Rc};
 
 use anyhow::anyhow;
 use esp_idf_hal::{
@@ -6,15 +6,17 @@ use esp_idf_hal::{
     temp_sensor::TempSensorDriver,
 };
 use esp_idf_svc::sys::esp_mac_type_t;
-use esp_idf_svc::wifi::{AuthMethod, BlockingWifi, ClientConfiguration, Configuration, EspWifi};
+use esp_idf_svc::wifi::{BlockingWifi, EspWifi};
 use serde::Serialize;
+use thingbuf::mpsc::blocking::StaticSender;
+
+#[cfg(feature = "usb_pd")]
+use crate::hal::husb238::{Capabilities, Husb238Driver, Status};
 
 use crate::{
-    hal::{
-        husb238::{Capabilities, Husb238Driver, Status},
-        ledc::PwmController,
-    },
+    hal::ledc::PwmController,
     rpc::{RpcCall, RpcResponse},
+    BuildInfo, WifiConfig, BUILD_INFO, LAST_UART_MSG,
 };
 use esp_idf_hal::sys::{
     esp_mac_type_t_ESP_MAC_BASE, esp_mac_type_t_ESP_MAC_BT, esp_mac_type_t_ESP_MAC_WIFI_STA,
@@ -22,16 +24,98 @@ use esp_idf_hal::sys::{
 };
 
 pub struct RpcHandler {
-    pub pwm: Rc<parking_lot::Mutex<PwmController>>,
-    pub temp_sensor: TempSensorDriver<'static>,
-    pub husb: Husb238Driver,
-    pub wifi: BlockingWifi<EspWifi<'static>>,
+    sys: SysHandler,
+    conn: ConnHandler,
+    wand: WandHandler,
+    uart: UartHandler,
+}
+
+impl RpcHandler {
+    pub fn new(
+        pwm: Rc<parking_lot::Mutex<PwmController>>,
+        temp: TempSensorDriver<'static>,
+        wifi: BlockingWifi<EspWifi<'static>>,
+        uart_tx: StaticSender<String>,
+    ) -> Self {
+        Self {
+            sys: SysHandler { temp_sensor: temp },
+            conn: ConnHandler { wifi },
+            wand: WandHandler { pwm },
+            uart: UartHandler { uart_tx },
+        }
+    }
+
+    pub fn rpc_call(&mut self, call: RpcCall<'_>, response: &mut Vec<u8>) -> anyhow::Result<()> {
+        let (namespace, method) = call.method.split_once(':').unwrap();
+        let res = match namespace {
+            "sys" => self.sys.handle(call, method),
+            "conn" => self.conn.handle(call, method),
+            "wand" => self.wand.handle(call, method),
+            "uart" => self.uart.handle(call, method),
+            _ => RpcResponse::new::<(), _>(
+                call.id,
+                anyhow::Result::Err(anyhow!("Invalid namespace.")),
+            ),
+        };
+
+        serde_json::to_writer(response, &res)?;
+        Ok(())
+    }
+}
+
+macro_rules! handle_methods {
+    ($self:ident, $call_method:expr, $call:expr => withargs [$($method:ident);*] noargs [$($noargsmethod:ident);*]) => {
+        {
+            match $call_method {
+                $(
+                    // todo: don't unwrap here
+                    stringify!($method) => {
+                        let params = match serde_json::from_str($call.params.get()) {
+                            Ok(v) => v,
+                            Err(e) => return RpcResponse::new::<(), anyhow::Error>($call.id, anyhow::Result::Err(anyhow!("Invalid JSON for the arguments: {}", e))),
+                        };
+
+                        RpcResponse::new::<_, anyhow::Error>($call.id, $self.$method(params))
+                    },
+                )*
+                $(
+                    stringify!($noargsmethod) => RpcResponse::new::<_, anyhow::Error>($call.id, $self.$noargsmethod()),
+                )*
+                _ => RpcResponse::new::<(), anyhow::Error>($call.id, anyhow::Result::Err(anyhow!("Invalid method.")))
+            }
+        }
+    }
+}
+
+pub struct SysHandler {
+    temp_sensor: TempSensorDriver<'static>,
 }
 
 #[derive(Serialize)]
 pub struct SystemInfo {
     temperature: f32,
     free_memory: u32,
+}
+
+impl SysHandler {
+    pub fn handle(&mut self, call: RpcCall<'_>, method: &str) -> RpcResponse {
+        handle_methods! (self, method, call => withargs [] noargs [health; restart; build_info])
+    }
+
+    pub fn build_info(&mut self) -> anyhow::Result<BuildInfo> {
+        Ok(BUILD_INFO)
+    }
+
+    pub fn health(&mut self) -> anyhow::Result<SystemInfo> {
+        Ok(SystemInfo {
+            temperature: self.temp_sensor.get_celsius()?,
+            free_memory: unsafe { esp_get_free_heap_size() },
+        })
+    }
+
+    pub fn restart(&mut self) -> anyhow::Result<()> {
+        esp_idf_svc::hal::reset::restart()
+    }
 }
 
 #[derive(Serialize)]
@@ -66,82 +150,70 @@ impl MACAddresses {
     }
 }
 
-#[derive(Serialize)]
-pub struct PowerStatus {
-    capabilities: Capabilities,
-    status: Status,
+pub struct ConnHandler {
+    wifi: BlockingWifi<EspWifi<'static>>,
 }
 
-impl RpcHandler {
-    pub fn rpc_call(&mut self, call: RpcCall<'_>, response: &mut Vec<u8>) {
-        let (namespace, method) = call.method.split_once(':').unwrap();
-        let res = match (namespace, method) {
-            ("mgmt", "health") => RpcResponse::new(call.id, self.mgmt_health()),
-            ("mgmt", "addr") => RpcResponse::new(call.id, self.mgmt_addr()),
-            ("mgmt", "power") => RpcResponse::new(call.id, self.mgmt_power()),
-            ("mgmt", "restart") => self.mgmt_restart(),
-            ("mgmt", "set_wifi") => RpcResponse::new(
-                call.id,
-                self.mgmt_set_wifi(serde_json::from_str(call.params.get()).unwrap()),
-            ),
-            ("wand", "set_percent") => RpcResponse::new(
-                call.id,
-                self.wand_set_percent(serde_json::from_str(call.params.get()).unwrap()),
-            ),
-            ("wand", "get_percent") => RpcResponse::new(call.id, self.wand_get_percent()),
-            (_, _) => {
-                RpcResponse::new::<(), _>(call.id, anyhow::Result::Err(anyhow!("Invalid method.")))
-            }
-        };
-
-        serde_json::to_writer(response, &res).unwrap();
-        // let res: RpcResponse = RpcResponse::new(call.id, res)
-    }
-}
-
-impl RpcHandler {
-    pub fn wand_get_percent(&mut self) -> anyhow::Result<i64> {
-        Ok(self.pwm.lock().get_percent())
+impl ConnHandler {
+    pub fn handle(&mut self, call: RpcCall<'_>, method: &str) -> RpcResponse {
+        handle_methods! (self, method, call => withargs [set_wifi] noargs [addr])
     }
 
-    pub fn wand_set_percent(&mut self, args: [i64; 1]) -> anyhow::Result<()> {
-        self.pwm.lock().set_percent(args[0]);
+    pub fn set_wifi(&mut self, args: [WifiConfig; 1]) -> anyhow::Result<()> {
+        let mut file = File::create("/littlefs/wifi.json")?;
+        serde_json::to_writer(&mut file, &args[0])?;
+
         Ok(())
     }
 
-    pub fn mgmt_health(&mut self) -> anyhow::Result<SystemInfo> {
-        Ok(SystemInfo {
-            temperature: self.temp_sensor.get_celsius()?,
-            free_memory: unsafe { esp_get_free_heap_size() },
-        })
-    }
-
-    pub fn mgmt_addr(&mut self) -> anyhow::Result<Addresses> {
+    pub fn addr(&mut self) -> anyhow::Result<Addresses> {
         Ok(Addresses {
             ip: self.wifi.wifi().sta_netif().get_ip_info()?.ip,
             mac: MACAddresses::get()?,
         })
     }
+}
 
-    pub fn mgmt_power(&mut self) -> anyhow::Result<PowerStatus> {
-        Ok(PowerStatus {
-            capabilities: self.husb.get_capabilities()?,
-            status: self.husb.get_status()?,
-        })
+pub struct WandHandler {
+    pub pwm: Rc<parking_lot::Mutex<PwmController>>,
+}
+
+impl WandHandler {
+    pub fn handle(&mut self, call: RpcCall<'_>, method: &str) -> RpcResponse {
+        handle_methods! (self, method, call => withargs [set_percent] noargs [get_percent])
     }
 
-    pub fn mgmt_restart(&mut self) -> ! {
-        esp_idf_svc::hal::reset::restart()
+    pub fn get_percent(&mut self) -> anyhow::Result<i64> {
+        Ok(self.pwm.lock().get_percent())
     }
 
-    pub fn mgmt_set_wifi(&mut self, args: Vec<String>) -> anyhow::Result<()> {
-        let mut config = Configuration::Client(ClientConfiguration::default());
+    pub fn set_percent(&mut self, args: [i64; 1]) -> anyhow::Result<()> {
+        // let max_duty = 50;
+        // let duty = max_duty as f64 * (args[0] as f64 / 100.0);
+        // let duty: i64 = duty.trunc() as i64;
 
-        config.as_client_conf_mut().ssid = heapless::String::from_str(&args[0]).unwrap();
-        config.as_client_conf_mut().password = heapless::String::from_str(&args[1]).unwrap();
-        config.as_client_conf_mut().auth_method = AuthMethod::WPA2Personal;
+        // self.uart_tx.send("1111,".to_string()).unwrap();
 
-        self.wifi.set_configuration(&config)?;
+        self.pwm.lock().set_percent(args[0]);
+        Ok(())
+    }
+}
+
+pub struct UartHandler {
+    pub uart_tx: StaticSender<String>,
+}
+
+impl UartHandler {
+    pub fn handle(&mut self, call: RpcCall<'_>, method: &str) -> RpcResponse {
+        handle_methods! (self, method, call => withargs [send] noargs [get_last])
+    }
+
+    pub fn get_last(&mut self) -> anyhow::Result<String> {
+        Ok(LAST_UART_MSG.lock().clone())
+    }
+
+    pub fn send(&mut self, args: [String; 1]) -> anyhow::Result<()> {
+        self.uart_tx.send(args[0].clone()).unwrap();
         Ok(())
     }
 }
