@@ -64,6 +64,18 @@ class Client():
     async def wand_set_percent(self, pct: int):
         return await self.make_call("wand", "set_percent", [pct])
 
+    async def wand_set_lovense_mappings(self, low: int, high: int):
+        return await self.make_call("wand", "update_lovense_mapping", [low, high])
+   
+    async def wand_set_light_mappings(self, bottom: int, mid_low: int, mid_high: int, top: int):
+        return await self.make_call("wand", "set_light_mappings", [bottom, mid_low, mid_high, top])
+   
+    async def wand_set_button_increments(self, bottom: int, top: int):
+        return await self.make_call("wand", "set_button_increments", [bottom, top])
+   
+    async def sys_get_addr(self):
+        return await self.make_call("conn", "addr", [])
+
     async def sys_build_info(self):
         return await self.make_call("sys", "build_info", [])
     

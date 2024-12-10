@@ -13,15 +13,14 @@ use thingbuf::mpsc::blocking::StaticSender;
 use crate::hal::husb238::{Capabilities, Husb238Driver, Status};
 
 use crate::{
-    hal::ledc::PwmController,
-    rpc::{RpcCall, RpcResponse},
-    wifi::{WifiConfig, WifiManager},
-    BuildInfo, BUILD_INFO, LAST_UART_MSG,
+    config::ConfigType, hal::{hitachi_board::{HitachiConfig, Lights}, ledc::PwmController}, rpc::{RpcCall, RpcResponse}, wifi::{WifiConfig, WifiManager}, BuildInfo, BUILD_INFO, LAST_UART_MSG, UPDATE_MAPPINGS
 };
 use esp_idf_hal::sys::{
     esp_mac_type_t_ESP_MAC_BASE, esp_mac_type_t_ESP_MAC_BT, esp_mac_type_t_ESP_MAC_WIFI_STA,
     esp_read_mac,
 };
+
+use super::lovense::LovenseConfig;
 
 pub struct RpcHandler {
     sys: SysHandler,
@@ -40,7 +39,7 @@ impl RpcHandler {
         Self {
             sys: SysHandler { temp_sensor: temp },
             conn: ConnHandler { wifi },
-            wand: WandHandler { pwm },
+            wand: WandHandler { pwm, uart_tx: uart_tx.clone(), mappings: HitachiConfig::read().unwrap().unwrap() },
             uart: UartHandler { uart_tx },
         }
     }
@@ -161,7 +160,7 @@ impl ConnHandler {
 
     pub fn set_wifi(&mut self, args: [WifiConfig; 1]) -> anyhow::Result<()> {
         let [conf] = args;
-        self.wifi.store_config(&conf)?;
+        conf.store()?;
         self.wifi.stop()?;
         self.wifi.set_config(conf)?;
         self.wifi.start()?;
@@ -179,11 +178,13 @@ impl ConnHandler {
 
 pub struct WandHandler {
     pub pwm: Rc<parking_lot::Mutex<PwmController>>,
+    pub uart_tx: StaticSender<String>,
+    pub mappings: HitachiConfig
 }
 
 impl WandHandler {
     pub fn handle(&mut self, call: RpcCall<'_>, method: &str) -> RpcResponse {
-        handle_methods! (self, method, call => withargs [set_percent] noargs [get_percent])
+        handle_methods! (self, method, call => withargs [set_percent; update_mappings; update_lovense_mapping; set_button_increments; set_light_mappings] noargs [get_percent])
     }
 
     pub fn get_percent(&mut self) -> anyhow::Result<i64> {
@@ -198,6 +199,45 @@ impl WandHandler {
         // self.uart_tx.send("1111,".to_string()).unwrap();
 
         self.pwm.lock().set_percent(args[0]);
+
+        let lights = Lights::from_mapping(args[0], &self.mappings.light_mappings);
+
+        let mut slot = self.uart_tx.send_ref()?;
+        slot.clear();
+        lights.write_into(&mut slot);
+        drop(slot);
+
+        Ok(())
+    }
+
+    pub fn update_mappings(&mut self, args: [HitachiConfig; 1]) -> anyhow::Result<()> {
+        args[0].store()?;
+        self.mappings = args[0];
+
+        UPDATE_MAPPINGS.store(true, std::sync::atomic::Ordering::Relaxed);
+
+        Ok(())
+    }
+
+    pub fn set_button_increments(&mut self, args: [i64; 2]) -> anyhow::Result<()> {
+        let mut conf = HitachiConfig::read()?.unwrap();
+        conf.button_mappings = args;
+        conf.store()?;
+        Ok(())
+    }
+
+    pub fn set_light_mappings(&mut self, args: [i64; 4]) -> anyhow::Result<()> {
+        let mut conf = HitachiConfig::read()?.unwrap();
+        conf.light_mappings = args;
+        conf.store()?;
+        Ok(())
+    }
+
+
+    pub fn update_lovense_mapping(&mut self, args: [i64; 2]) -> anyhow::Result<()> {
+        LovenseConfig { start: args[0], end: args[1] }.store()?;
+        UPDATE_MAPPINGS.store(true, std::sync::atomic::Ordering::Relaxed);
+
         Ok(())
     }
 }

@@ -73,6 +73,10 @@ async def set_wifi(ssid, password):
     print(f"Updated wifi config: {ret}")
 
 @cli.command()
+async def get_addr():
+    print(await client.conn_addresses())
+
+@cli.command()
 @click.argument("ssid")
 @click.argument("username")
 @click.argument("password")
@@ -95,9 +99,29 @@ async def rpc(namespace, method, args):
         json.dumps(await client.make_call(namespace, method, *args).asdict(), indent=4)
     )
 
+@cli.command()
+@click.argument("low", type=click.INT)
+@click.argument("high", type=click.INT)
+async def wand_set_lovense_mapping(low: int, high: int):
+    print(await client.wand_set_lovense_mappings(low, high))
 
 @cli.command()
-@click.argument("percent")
+@click.argument("low", type=click.INT)
+@click.argument("high", type=click.INT)
+async def wand_set_button_increments(low: int, high: int):
+    print(await client.wand_set_button_increments(low, high))
+
+@cli.command()
+@click.argument("bottom", type=click.INT)
+@click.argument("mid_low", type=click.INT)
+@click.argument("mid_high", type=click.INT)
+@click.argument("top", type=click.INT)
+async def wand_set_light_mappings(bottom: int, mid_low: int, mid_high: int, top: int):
+    print(await client.set_light_mappings(bottom, mid_low, mid_high, top))
+
+
+@cli.command()
+@click.argument("percent", type=click.INT)
 async def wand_set_percent(percent: int):
     print(await client.wand_set_percent(percent))
 

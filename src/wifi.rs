@@ -12,6 +12,8 @@ use log::info;
 use parking_lot::lock_api::Mutex;
 use serde::{Deserialize, Serialize};
 
+use crate::config::ConfigType;
+
 #[derive(Serialize, Deserialize)]
 pub struct WifiConfig {
     pub ssid: heapless::String<32>,
@@ -36,28 +38,17 @@ pub struct WifiManager {
     wifi: Rc<parking_lot::Mutex<BlockingWifi<EspWifi<'static>>>>,
 }
 
-static WIFI_CONFIG_PATH: &str = "/littlefs/wifi.json";
+
+impl ConfigType for WifiConfig {
+    const PATH: &str = "/littlefs/wifi.json";
+    const HAS_DEFAULT: bool = false;
+}
 
 impl WifiManager {
     pub fn new(wifi: EspWifi<'static>, eloop: EspEventLoop<System>) -> Self {
         WifiManager {
             wifi: Rc::new(Mutex::new(BlockingWifi::wrap(wifi, eloop).unwrap())),
         }
-    }
-    pub fn read_config() -> anyhow::Result<Option<WifiConfig>> {
-        if std::fs::exists(WIFI_CONFIG_PATH)? {
-            let mut file = File::open(WIFI_CONFIG_PATH)?;
-            let config = serde_json::from_reader(&mut file)?;
-            Ok(Some(config))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn store_config(&self, config: &WifiConfig) -> anyhow::Result<()> {
-        let f = File::create(WIFI_CONFIG_PATH)?;
-        serde_json::to_writer(f, config)?;
-        Ok(())
     }
 
     pub fn set_config(&self, config: WifiConfig) -> anyhow::Result<()> {

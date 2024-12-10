@@ -1,6 +1,8 @@
-use std::collections::VecDeque;
+use core::str;
+use std::{collections::VecDeque, str::FromStr, sync::Arc};
 
-use esp_idf_hal::{delay::BLOCK, io::Write, uart::UartDriver};
+use arrayvec::ArrayString;
+use esp_idf_hal::{delay::BLOCK, io::Write, task::queue::Queue, uart::UartDriver};
 use memchr::memchr_iter;
 use thingbuf::{
     mpsc::blocking::{StaticChannel, StaticSender},
@@ -15,7 +17,7 @@ pub static UART_QUEUE: StaticChannel<String, 32, DefaultRecycle> =
 pub fn spawn_uart_thread(
     engine: RpcRequester,
     uart: UartDriver<'static>,
-    // uart_bus: Arc<Queue<ArrayString<32>>>
+    uart_bus: Arc<Queue<ArrayString<32>>>
 ) -> (
     std::thread::JoinHandle<()>,
     std::thread::JoinHandle<()>,
@@ -38,9 +40,9 @@ pub fn spawn_uart_thread(
                 let mut slot = engine.req_tx.send_ref().unwrap();
                 slot.buffer.extend_from_slice(&rem[cursor..pos]);
                 slot.src = MessageSource::Uart;
-                // if let Ok(s) = str::from_utf8(&rem[cursor..pos]) {
-                //     uart_bus.send_back(ArrayString::from_str(s).unwrap(), 0);
-                // }
+                if let Ok(s) = str::from_utf8(&rem[cursor..pos]) {
+                    let _ = uart_bus.send_back(ArrayString::from_str(s).unwrap(), 0);
+                }
                 // tx.send(String::from_utf8_lossy(&rem[cursor..pos]).into_owned()).unwrap();
                 cursor = pos;
             }

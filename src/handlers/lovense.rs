@@ -1,18 +1,36 @@
 use std::{ops::Range, rc::Rc};
 
-use thingbuf::mpsc::blocking::SendRef;
+use serde::{Deserialize, Serialize};
+use thingbuf::mpsc::blocking::{SendRef, StaticSender};
 
 use crate::{
-    hal::ledc::PwmController,
-    rpc::{ResponseMessage, ResponseTag},
+    config::ConfigType, hal::{hitachi_board::{HitachiConfig, Lights}, ledc::PwmController}, rpc::{ResponseMessage, ResponseTag}
 };
 
 fn map_range(lhs: Range<i64>, rhs: Range<i64>, val: i64) -> i64 {
     rhs.start + ((val - lhs.start) * (rhs.end - rhs.start) / (lhs.end - lhs.start))
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct LovenseConfig {
+    pub start: i64,
+    pub end: i64
+}
+
+impl ConfigType for LovenseConfig {
+    const PATH: &str = "/littlefs/lovense.json";
+    const HAS_DEFAULT: bool = true;
+
+    fn default() -> Option<Self> {
+        Some(LovenseConfig { start: 65, end: 100 })
+    }
+}
+
 pub struct LovenseHandler {
     pub pwm: Rc<parking_lot::Mutex<PwmController>>,
+    pub uart_tx: StaticSender<String>,
+    pub mappings: HitachiConfig,
+    pub lovense_config: LovenseConfig
 }
 
 impl LovenseHandler {
@@ -32,7 +50,7 @@ impl LovenseHandler {
             "GetLight" => &["Light", "1"],
             "Vibrate" => {
                 let lovense_range = 0..20;
-                let target_range = 65..100;
+                let target_range = self.lovense_config.start..self.lovense_config.end;
 
                 let strength = args[1].parse::<i64>().unwrap();
                 let mapped = if strength > 0 {
@@ -43,6 +61,12 @@ impl LovenseHandler {
 
                 self.pwm.lock().set_percent(mapped);
 
+                let lights = Lights::from_mapping(mapped, &self.mappings.light_mappings);
+        
+                let mut slot = self.uart_tx.send_ref().unwrap();
+                slot.clear();
+                lights.write_into(&mut slot);
+                drop(slot);
                 // let max_duty = 999;
                 // let duty = max_duty as f64 * (mapped as f64 / 100.0);
                 // let duty: i64 = duty.trunc() as i64;
