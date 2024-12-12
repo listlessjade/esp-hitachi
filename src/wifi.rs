@@ -1,4 +1,4 @@
-use std::{fs::File, net::Ipv4Addr, rc::Rc};
+use std::{net::Ipv4Addr, rc::Rc};
 
 use esp_idf_hal::sys::{
     esp, esp_eap_client_set_identity, esp_eap_client_set_password, esp_eap_client_set_username,
@@ -12,9 +12,9 @@ use log::info;
 use parking_lot::lock_api::Mutex;
 use serde::{Deserialize, Serialize};
 
-use crate::config::ConfigType;
+use crate::{config::ConfigType, impl_conf_type};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 pub struct WifiConfig {
     pub ssid: heapless::String<32>,
     pub authentication: WifiAuthentication,
@@ -22,6 +22,7 @@ pub struct WifiConfig {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "type")]
+#[derive(Default)]
 pub enum WifiAuthentication {
     #[serde(alias = "personal")]
     WPA2Personal { password: heapless::String<64> },
@@ -31,17 +32,15 @@ pub enum WifiAuthentication {
         username: String,
         password: String,
     },
+    #[default]
+    None,
 }
+
+impl_conf_type!(WifiConfig, "/littlefs/wifi.json", WIFI_CONFIG);
 
 #[derive(Clone)]
 pub struct WifiManager {
     wifi: Rc<parking_lot::Mutex<BlockingWifi<EspWifi<'static>>>>,
-}
-
-
-impl ConfigType for WifiConfig {
-    const PATH: &str = "/littlefs/wifi.json";
-    const HAS_DEFAULT: bool = false;
 }
 
 impl WifiManager {
@@ -51,22 +50,23 @@ impl WifiManager {
         }
     }
 
-    pub fn set_config(&self, config: WifiConfig) -> anyhow::Result<()> {
+    pub fn set_config(&self, config: &WifiConfig) -> anyhow::Result<()> {
         let mut wifi = self.wifi.lock();
         let mut esp_config_base = wifi.get_configuration()?;
         let esp_config = esp_config_base.as_client_conf_mut();
-        esp_config.ssid = config.ssid;
+        esp_config.ssid = config.ssid.clone();
 
         match config.authentication {
-            WifiAuthentication::WPA2Personal { password } => {
+            WifiAuthentication::None => esp_config.auth_method = AuthMethod::None,
+            WifiAuthentication::WPA2Personal { ref password } => {
                 esp_config.auth_method = AuthMethod::WPA2Personal;
-                esp_config.password = password;
+                esp_config.password = password.clone();
                 esp!(unsafe { esp_wifi_sta_enterprise_disable() })?;
             }
             WifiAuthentication::WPA2Enterprise {
-                identity,
-                username,
-                password,
+                ref identity,
+                ref username,
+                ref password,
             } => {
                 esp_config.auth_method = AuthMethod::WPA2Enterprise;
                 esp!(unsafe {

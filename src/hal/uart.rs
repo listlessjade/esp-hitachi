@@ -11,17 +11,19 @@ use thingbuf::{
 
 use crate::rpc::{MessageSource, RpcRequester};
 
-pub static UART_QUEUE: StaticChannel<String, 32, DefaultRecycle> =
-    StaticChannel::<String, 32, DefaultRecycle>::new();
+use super::wand::Lights;
+
+pub static UART_QUEUE: StaticChannel<Lights, 32, DefaultRecycle> =
+    StaticChannel::<Lights, 32, DefaultRecycle>::new();
 
 pub fn spawn_uart_thread(
     engine: RpcRequester,
     uart: UartDriver<'static>,
-    uart_bus: Arc<Queue<ArrayString<32>>>
+    uart_bus: Arc<Queue<ArrayString<32>>>,
 ) -> (
     std::thread::JoinHandle<()>,
     std::thread::JoinHandle<()>,
-    StaticSender<String>,
+    StaticSender<Lights>,
 ) {
     let (uart_tx_channel, uart_rx_channel) = UART_QUEUE.split();
     let (mut uart_tx, uart_rx) = uart.into_split();
@@ -52,10 +54,11 @@ pub fn spawn_uart_thread(
     });
 
     let sender_thread = std::thread::spawn(move || {
+        let mut str = String::new();
         for line in &uart_rx_channel {
-            uart_tx.write_all(line.as_bytes()).unwrap();
-            uart_tx.write_all(b"\r\n").unwrap();
-            // uart_tx.write_all(format!("{}\r\n", line).as_bytes()).unwrap();
+            str.clear();
+            line.write_into(&mut str);
+            uart_tx.write_all(str.as_bytes()).unwrap();
         }
     });
 

@@ -95,9 +95,7 @@ async def restart():
 @click.argument("method")
 @click.argument("args", nargs=-1)
 async def rpc(namespace, method, args):
-    print(
-        json.dumps(await client.make_call(namespace, method, *args).asdict(), indent=4)
-    )
+    print(await client.make_call(namespace, method, *args))
 
 @cli.command()
 @click.argument("low", type=click.INT)

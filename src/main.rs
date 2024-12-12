@@ -1,12 +1,14 @@
 #![feature(maybe_uninit_slice)]
 
-use std::{ffi::CString, rc::Rc, sync::{atomic::AtomicBool, Arc}};
+use std::{
+    ffi::CString,
+    rc::Rc,
+    sync::{atomic::AtomicBool, Arc},
+};
 
 use ble::run_ble;
 use config::ConfigType;
-use esp_idf_hal::{
-    gpio, task::queue::Queue, uart::UartDriver
-};
+use esp_idf_hal::{gpio, task::queue::Queue, uart::UartDriver};
 use esp_idf_svc::{
     eventloop::EspSystemEventLoop,
     hal::{
@@ -21,8 +23,11 @@ use esp_idf_svc::{
 };
 #[cfg(feature = "usb_pd")]
 use hal::husb238::Husb238Driver;
-use hal::{hitachi_board::{HitachiConfig, Lights}, ledc::PwmController, uart::spawn_uart_thread};
-use handlers::{lovense::{LovenseConfig, LovenseHandler}, rpc::RpcHandler};
+use hal::{
+    uart::spawn_uart_thread,
+    wand::{Lights, Wand},
+};
+use handlers::{lovense::LovenseHandler, rpc::RpcHandler};
 use http::run_http;
 use rpc::{ChannelOptions, MessageSource, ResponseTag, RpcCall, RpcResponse, REQUEST_QUEUE};
 use serde::Serialize;
@@ -30,12 +35,12 @@ use wifi::{WifiConfig, WifiManager};
 // use script::ScriptRunner;
 
 mod ble;
+mod config;
 mod hal;
 mod handlers;
 mod http;
 mod rpc;
 mod wifi;
-mod config;
 
 #[derive(Serialize, Copy, Clone)]
 pub struct BuildInfo {
@@ -149,19 +154,9 @@ fn main() -> anyhow::Result<()> {
         sys_loop,
     );
 
-    match WifiConfig::read() {
-        Ok(Some(v)) => {
-            if let Err(e) = wifi.set_config(v) {
-                log::error!("Failed to set wifi config: {e}");
-            }
-        }
-        Ok(None) => {
-            log::warn!("Failed to set wifi config: non-existent")
-        }
-        Err(e) => {
-            log::error!("Failed to read wifi config: {e}");
-        }
-    };
+    if let Err(e) = wifi.set_config(&WifiConfig::read()) {
+        log::error!("Failed to set wifi config: {e}");
+    }
 
     if let Err(e) = wifi.start() {
         log::error!("Failed to start wifi: {e}");
@@ -198,27 +193,33 @@ fn main() -> anyhow::Result<()> {
         peripherals.pins.gpio10,
     )?;
 
-    let pwm_controller = Rc::new(parking_lot::Mutex::new(PwmController {
+    let pwm_controller = Rc::new(parking_lot::Mutex::new(Wand {
         percent: 0,
         driver: ledc_driver,
-        // uart_tx: uart_tx.clone(),
+        uart_tx: uart_tx.clone(),
     }));
 
     let mut lovense_handler = LovenseHandler {
         pwm: Rc::clone(&pwm_controller),
-        uart_tx: uart_tx.clone(),
-        mappings: HitachiConfig::read()?.unwrap(),
-        lovense_config: LovenseConfig::read()?.unwrap(),
     };
 
     // leds, pwm_t, pwm_d0, d_2, d_4
-    uart_tx.send("1111,".to_string()).unwrap();
-    let mut rpc_handler = RpcHandler::new(Rc::clone(&pwm_controller), temp_sensor, wifi, uart_tx.clone());
+    let _ = uart_tx.send(Lights {
+        bottom: true,
+        ..Default::default()
+    });
+
+    // uart_tx.send("1111,".to_string()).unwrap();
+    let mut rpc_handler = RpcHandler::new(
+        Rc::clone(&pwm_controller),
+        temp_sensor,
+        wifi,
+        uart_tx.clone(),
+        req_tx.clone()
+    );
 
     let _ble_thread = std::thread::spawn(|| run_ble(ble_tx));
     let _http_server = run_http(http_tx, 8080);
-
-    let mut hitachi_mappings = HitachiConfig::read()?.unwrap();
 
     loop {
         let message = req_rx.recv_ref().unwrap();
@@ -231,12 +232,6 @@ fn main() -> anyhow::Result<()> {
             }
             MessageSource::HttpRpc => &http_res_tx,
             MessageSource::BleLovense => {
-                if UPDATE_MAPPINGS.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    lovense_handler.mappings = HitachiConfig::read()?.unwrap();
-                    lovense_handler.lovense_config = LovenseConfig::read()?.unwrap();
-                    hitachi_mappings = lovense_handler.mappings;
-                }
-
                 lovense_handler.handle(
                     std::str::from_utf8(&message.buffer).unwrap(),
                     ble_res_tx.send_ref().unwrap(),
@@ -245,12 +240,6 @@ fn main() -> anyhow::Result<()> {
                 continue;
             }
             MessageSource::Uart => {
-                if UPDATE_MAPPINGS.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                    lovense_handler.mappings = HitachiConfig::read()?.unwrap();
-                    lovense_handler.lovense_config = LovenseConfig::read()?.unwrap();
-                    hitachi_mappings = lovense_handler.mappings;
-                }
-
                 let msg = String::from_utf8_lossy(&message.buffer).into_owned();
                 *LAST_UART_MSG.lock() = msg.clone();
 
@@ -259,31 +248,55 @@ fn main() -> anyhow::Result<()> {
                     continue;
                 }
 
+
                 if let Some((_, state)) = msg_trimmed.split_once(':') {
                     // state.by
-                    let button_states = [state.as_bytes()[0] == b'0', state.as_bytes()[1] == b'0', state.as_bytes()[2] == b'0'];
-                    
-                    let delta = if button_states[1] {
-                        Some(hitachi_mappings.button_mappings[0])
-                    } else if button_states[2] {
-                        Some(hitachi_mappings.button_mappings[1])
-                    } else { None };
+                    let button_states = [
+                        state.as_bytes()[0] == b'0',
+                        state.as_bytes()[1] == b'0',
+                        state.as_bytes()[2] == b'0',
+                    ];
 
-                    if let Some(delta) = delta {
-                        let mut pwm = pwm_controller.lock();
-                        let pct = pwm.get_percent() + delta;
-                        pwm.set_percent(pct);
-                                
-                        let lights = Lights::from_mapping(pct, &hitachi_mappings.light_mappings);
-                
-                        let mut slot = uart_tx.send_ref().unwrap();
-                        slot.clear();
-                        lights.write_into(&mut slot);
-                        drop(slot);
+                    let mut wand = pwm_controller.lock();
+                    let cur = wand.get_percent();
+                    if button_states[0] {
+                        wand.set_percent(cur - 25);
+                    } else if button_states[1] {
+                        wand.set_percent(cur + 25);
+                    } else if button_states[2] {
+                        wand.set_percent(0);
                     }
+                    // if let Err(e) = script.handle(button_states) {
+                    //     log::error!("on handling script: {e}");
+                    // }
+
                 }
 
                 continue;
+
+                //     let delta = if button_states[1] {
+                //         Some(hitachi_mappings.button_mappings[0])
+                //     } else if button_states[2] {
+                //         Some(hitachi_mappings.button_mappings[1])
+                //     } else {
+                //         None
+                //     };
+
+                //     if let Some(delta) = delta {
+                //         let mut pwm = pwm_controller.lock();
+                //         let pct = pwm.get_percent() + delta;
+                //         pwm.set_percent(pct);
+
+                //         let lights = Lights::from_mapping(pct, &hitachi_mappings.light_mappings);
+
+                //         let mut slot = uart_tx.send_ref().unwrap();
+                //         slot.clear();
+                //         lights.write_into(&mut slot);
+                //         drop(slot);
+                //     }
+                // }
+
+                // continue;
             }
         };
 

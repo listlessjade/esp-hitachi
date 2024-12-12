@@ -4,15 +4,17 @@ target = "riscv32imac-esp-espidf"
 [target.riscv32imac-esp-espidf]
 linker = "ldproxy"
 runner = "espflash flash --monitor --partition-table partitions.csv --baud 921600" # Select this runner for espflash v3.x.x
-rustflags = [ "--cfg",  "espidf_time64"] # Extending time_t for ESP IDF 5: https://github.com/esp-rs/rust/issues/110
+rustflags = ["-Zlocation-detail=none", "--cfg",  "espidf_time64"] # Extending time_t for ESP IDF 5: https://github.com/esp-rs/rust/issues/110
 
 [unstable]
 build-std = ["std", "panic_abort"]
+build-std-features = ["panic_immediate_abort", "optimize_for_size"]
 
 [env]
 MCU="esp32c6"
 # Note: this variable is not used by the pio builder (`cargo build --features pio`)
-ESP_IDF_VERSION = "v5.2.2"
+# ESP_IDF_VERSION = "v5.2.2"
+IDF_PATH = "/home/emi/programming/esp-idf"
 
 # Workaround for https://github.com/esp-rs/esp-idf-template/issues/174 
 CRATE_CC_NO_DEFAULTS = "1"

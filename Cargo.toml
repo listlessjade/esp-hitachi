@@ -19,6 +19,7 @@ opt-level = "z"
 lto = true
 strip = true
 codegen-units = 1
+panic = "abort"
 
 [profile.dev]
 debug = true    # Symbols are nice and they don't increase the size on Flash
@@ -32,14 +33,14 @@ embedded-svc = "0.28.0"
 parking_lot = "0.12.3"
 serde_json = { version = "1.0.128", default-features = false, features = ["alloc", "raw_value", "std"] }
 serde = { version = "1.0.210", features = ["alloc", "derive", "std"], default-features = false }
-esp32-nimble = "0.8.0"
+esp32-nimble = "0.8.2"
 thingbuf = { git = "https://github.com/kore-signet/thingbuf.git", features = ["static"] }
 heapless = { version = "0.8.0", features = ["serde"] }
 esp-idf-hal = { git = "https://github.com/kore-signet/esp-idf-hal.git", features = ["rmt-legacy"] }
-multi_log = "0.1.2"
 mycelium-bitfield = "0.1.5"
 memchr = "2.7.4"
 arrayvec = "0.7.6"
+arc-swap = "1.7.1"
 
 [[package.metadata.esp-idf-sys.extra_components]]
 remote_component = { name = "espressif/mdns", version = "1.2" }
